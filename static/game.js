@@ -26,8 +26,17 @@ let zoom = 0.25;
 let skidMarks = [];
 let lastRearLeft = null;
 let lastRearRight = null;
+let socket;
+const ghosts = {};
+const playerId = Math.random().toString(36).slice(2);
 
 function create() {
+    socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+    socket.onmessage = ({ data }) => JSON.parse(data).forEach(p => {
+        const ghost = ghosts[p.id] ||= this.add.rectangle(0, 0, 40, 55, 0xff0000, 0.35).setDepth(4);
+        ghost.setPosition(p.x, p.y).setRotation(p.rot);
+    });
+
     // Big world
     this.matter.world.setBounds(0, 0, 2000, 2000);
 
@@ -114,6 +123,10 @@ function create() {
 }
 
 function update() {
+    if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ x: carFront.position.x, y: carFront.position.y, rot: carFront.angle }));
+    }
+
     // Sync visuals to physics bodies
     this.frontGfx.setPosition(carFront.position.x, carFront.position.y);
     this.frontGfx.setRotation(carFront.angle);
