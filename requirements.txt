@@ -1,3 +1,2 @@
-
 fastapi[stantard]
 uvicorn[standard]
