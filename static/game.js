@@ -34,73 +34,62 @@ let enginePhase = 0;
 let engineRev = 0;
 let engineFilterState = 0;
 
-function perlin2D(x, y) {
-    const fade = value => value * value * value * (value * (value * 6 - 15) + 10);
-    const interpolate = (a, b, amount) => a + (b - a) * amount;
-    const gradient = (gridX, gridY, offsetX, offsetY) => {
-        const hash = Math.sin(gridX * 127.1 + gridY * 311.7) * 43758.5453;
-        const angle = (hash - Math.floor(hash)) * Math.PI * 2;
-        return Math.cos(angle) * offsetX + Math.sin(angle) * offsetY;
-    };
+function createTrack(scene) {
+    const centerX = worldsize / 2;
+    const centerY = worldsize / 2;
+    const startAngle = Math.atan2(1000 - centerY, 1000 - centerX);
+    const startRadius = Math.hypot(1000 - centerX, 1000 - centerY);
+    const margin = 600;
+    const bends = [
+        { frequency: 3, cosine: 650 + Math.random() * 250, sine: 500 + Math.random() * 300 },
+        { frequency: 5, cosine: 450 + Math.random() * 250, sine: 350 + Math.random() * 250 },
+        { frequency: 7, cosine: 300 + Math.random() * 200, sine: 250 + Math.random() * 200 },
+        { frequency: 11, cosine: 180 + Math.random() * 160, sine: 150 + Math.random() * 150 }
+    ];
+    const points = [];
+    const divisions = 720;
 
-    const gridX = Math.floor(x);
-    const gridY = Math.floor(y);
-    const offsetX = x - gridX;
-    const offsetY = y - gridY;
-    const blendX = fade(offsetX);
-    const blendY = fade(offsetY);
-    const top = interpolate(
-        gradient(gridX, gridY, offsetX, offsetY),
-        gradient(gridX + 1, gridY, offsetX - 1, offsetY),
-        blendX
-    );
-    const bottom = interpolate(
-        gradient(gridX, gridY + 1, offsetX, offsetY - 1),
-        gradient(gridX + 1, gridY + 1, offsetX - 1, offsetY - 1),
-        blendX
-    );
+    for (let i = 0; i < divisions; i++) {
+        const angle = i / divisions * Math.PI * 2;
+        const offset = angle - startAngle;
+        let radius = startRadius;
+        for (const bend of bends) {
+            radius += bend.cosine * (Math.cos(bend.frequency * offset) - 1)
+                + bend.sine * Math.sin(bend.frequency * offset);
+        }
 
-    return interpolate(top, bottom, blendY);
-}
+        const dx = Math.cos(angle);
+        const dy = Math.sin(angle);
+        let maxRadius = Infinity;
+        if (dx > 0) maxRadius = Math.min(maxRadius, (worldsize - margin - centerX) / dx);
+        if (dx < 0) maxRadius = Math.min(maxRadius, (margin - centerX) / dx);
+        if (dy > 0) maxRadius = Math.min(maxRadius, (worldsize - margin - centerY) / dy);
+        if (dy < 0) maxRadius = Math.min(maxRadius, (margin - centerY) / dy);
+        radius = Phaser.Math.Clamp(radius, 500, maxRadius);
 
-function terrainNoise(x, y) {
-    let total = 0;
-    let amplitude = 1;
-    let amplitudeSum = 0;
-
-    for (let octave = 0; octave < 4; octave++) {
-        const frequency = 2 ** octave / 1200;
-        total += perlin2D(x * frequency, y * frequency) * amplitude;
-        amplitudeSum += amplitude;
-        amplitude *= 0.5;
+        points.push({
+            x: centerX + dx * radius,
+            y: centerY + dy * radius
+        });
     }
 
-    return Phaser.Math.Clamp(0.5 + total / amplitudeSum * 1.5, 0, 1);
-}
+    const track = scene.add.graphics().setDepth(-1);
+    track.lineStyle(580, 0x252530, 1);
+    track.beginPath();
+    track.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) {
+        track.lineTo(points[i].x, points[i].y);
+    }
+    track.closePath();
+    track.strokePath();
 
-function createTerrain(scene) {
-    const tileSize = 200;
-    const threshold = 0.75;
+    track.lineStyle(140, 0x555566, 1);
+    track.strokePath();
 
-    for (let x = 0; x < worldsize; x += tileSize) {
-        for (let y = 0; y < worldsize; y += tileSize) {
-            if (terrainNoise(x + tileSize / 2, y + tileSize / 2) > threshold) {
-                scene.add.rectangle(
-                    x + tileSize / 2,
-                    y + tileSize / 2,
-                    tileSize,
-                    tileSize,
-                    0x555577
-                ).setDepth(-1);
-                scene.matter.add.rectangle(
-                    x + tileSize / 2,
-                    y + tileSize / 2,
-                    tileSize,
-                    tileSize,
-                    { isStatic: true }
-                );
-            }
-        }
+    track.lineStyle(5, 0xd8d2a8, 0.8);
+    for (let i = 0; i < points.length; i += 12) {
+        const end = (i + 5) % points.length;
+        track.lineBetween(points[i].x, points[i].y, points[end].x, points[end].y);
     }
 }
 
@@ -160,7 +149,7 @@ function create() {
     // Big world
     this.matter.world.setBounds(0, 0, worldsize, worldsize);
 
-    createTerrain(this);
+    createTrack(this);
 
     // === CAR ===
     const startX = 1000;
@@ -181,7 +170,7 @@ function create() {
         frictionAir: 0.03,
         restitution: 0.1,
         density: 0.005,
-        chamfer: { radius: 6 }
+        chamfer: { radius: 6 },
     });
 
     // Two soft springs, side by side, to keep the body from acting like one rigid link
@@ -217,7 +206,8 @@ function create() {
     wasd = this.input.keyboard.addKeys({
         up: Phaser.Input.Keyboard.KeyCodes.W,
         left: Phaser.Input.Keyboard.KeyCodes.A,
-        right: Phaser.Input.Keyboard.KeyCodes.D
+        right: Phaser.Input.Keyboard.KeyCodes.D,
+        boost: Phaser.Input.Keyboard.KeyCodes.SPACE
     });
 
     // Camera
@@ -231,7 +221,7 @@ function create() {
     });
 
     // UI
-    this.add.text(16, 16, 'W / ↑  Accelerate\nA D or ← →  Steer\nMouse wheel  Zoom', {
+    this.add.text(16, 16, 'W / ↑  Accelerate\nSpace  Boost\nA D or ← →  Steer\nMouse wheel  Zoom', {
         fontSize: '18px',
         fill: '#ffffff',
         backgroundColor: '#000000aa',
@@ -252,13 +242,15 @@ function update(time, delta) {
     this.rearGfx.setRotation(carRear.angle);
 
     // === CONTROLS ===
-    const force = 0.09;
-    const turn = 0.08;
+    const accelerating = cursors.up.isDown || wasd.up.isDown;
+    const boosting = wasd.boost.isDown;
+    const force = (accelerating ? 0.04 : 0) + (boosting ? 0.03 : 0);
+    const turn = 0.06;
 
     const angle = carFront.angle;
 
     // Accelerate in facing direction
-    if (cursors.up.isDown || wasd.up.isDown) {
+    if (force > 0) {
         this.matter.body.applyForce(carFront, carFront.position, {
             x: Math.sin(angle) * force,
             y: -Math.cos(angle) * force
@@ -272,17 +264,14 @@ function update(time, delta) {
     } else if (cursors.right.isDown || wasd.right.isDown) {
         this.matter.body.setAngularVelocity(carFront, turn);
         //this.matter.body.setAngularVelocity(carRear, turn * 0.75);
-    } else {
-        // damp rotation when not steering
-        this.matter.body.setAngularVelocity(carFront, carFront.angularVelocity * 0.99);
-        this.matter.body.setAngularVelocity(carRear, carRear.angularVelocity * 0.99);
     }
+    this.matter.body.setAngularVelocity(carFront, carFront.angularVelocity * 0.90);
+    this.matter.body.setAngularVelocity(carRear, carRear.angularVelocity * 0.90);
 
     // Simple skid marks: draw behind the rear wheels when the car is moving and turning/accelerating
     const speed = Math.hypot(carRear.velocity.x, carRear.velocity.y);
     const steering = cursors.left.isDown || wasd.left.isDown || cursors.right.isDown || wasd.right.isDown;
-    const accelerating = cursors.up.isDown || wasd.up.isDown;
-    const revTarget = wasd.up.isDown ? 1 : 0;
+    const revTarget = (accelerating ? 0.65 : 0) + (boosting ? 0.35 : 0);
     engineRev += (revTarget - engineRev) * .05;
 
     if (speed > 0.8 && (steering || accelerating)) {
