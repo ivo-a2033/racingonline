@@ -53,6 +53,7 @@ let socket;
 const ghosts = {};
 const playerId = Math.random().toString(36).slice(2);
 const worldsize = 20000;
+const TRACK_START = { x: worldsize * 0.3, y: worldsize * 0.3 };
 let enginePhase = 0;
 let engineRev = 0;
 let engineFilterState = 0;
@@ -61,13 +62,14 @@ let rearTuningAmount = 0;
 function createTrack(scene) {
     const centerX = worldsize / 2;
     const centerY = worldsize / 2;
-    const startAngle = Math.atan2(1000 - centerY, 1000 - centerX);
-    const startRadius = Math.hypot(1000 - centerX, 1000 - centerY);
+    const startAngle = Math.atan2(TRACK_START.y - centerY, TRACK_START.x - centerX);
+    const startRadius = Math.hypot(TRACK_START.x - centerX, TRACK_START.y - centerY);
+    const bendScale = startRadius / Math.hypot(1000 - centerX, 1000 - centerY);
     const margin = 600;
     const bends = [
         { frequency: 3, cosine: 650 + Math.random() * 250, sine: 500 + Math.random() * 300 },
         { frequency: 5, cosine: 450 + Math.random() * 250, sine: 350 + Math.random() * 250 },
-        { frequency: 7, cosine: 300 + Math.random() * 200, sine: 250 + Math.random() * 200 },
+        { frequency: 7, cosine: 300 + Math.random() * 200, sine: 1250 + Math.random() * 200 },
         { frequency: 11, cosine: 180 + Math.random() * 160, sine: 150 + Math.random() * 150 }
     ];
     const points = [];
@@ -78,13 +80,13 @@ function createTrack(scene) {
         const offset = angle - startAngle;
         let radius = startRadius;
         for (const bend of bends) {
-            radius += bend.cosine * (Math.cos(bend.frequency * offset) - 1)
-                + bend.sine * Math.sin(bend.frequency * offset);
+            radius += (bend.cosine * (Math.cos(bend.frequency * offset) - 1)
+                + bend.sine * Math.sin(bend.frequency * offset)) * bendScale;
         }
 
         const dx = Math.cos(angle);
         const dy = Math.sin(angle);
-        let maxRadius = Infinity;
+        let maxRadius = 20000;
         if (dx > 0) maxRadius = Math.min(maxRadius, (worldsize - margin - centerX) / dx);
         if (dx < 0) maxRadius = Math.min(maxRadius, (margin - centerX) / dx);
         if (dy > 0) maxRadius = Math.min(maxRadius, (worldsize - margin - centerY) / dy);
@@ -125,8 +127,8 @@ function createTrack(scene) {
         const secondY = afterNext.y - next.y;
         const cross = firstX * secondY - firstY * secondX;
         const dot = firstX * secondX + firstY * secondY;
-        const turn = Math.abs(Math.atan2(cross, dot));
-        return Phaser.Math.Clamp(turn / ROAD_FULL_BLUE_TURN_RADIANS, 0, 1);
+        const turn = Math.atan2(cross, dot);
+        return Phaser.Math.Clamp(turn / ROAD_FULL_BLUE_TURN_RADIANS, -1, 1);
     });
     const averageSegments = Phaser.Math.Clamp(
         Math.floor(ROAD_TURN_AVERAGE_SEGMENTS),
@@ -149,9 +151,12 @@ function createTrack(scene) {
         const midpointX = (start.x + end.x) / 2;
         const midpointY = (start.y + end.y) / 2;
         const halfLaneWidth = 70;
-        const red = Math.round(255 + (40 - 255) * turnFactor);
-        const green = Math.round(48 + (123 - 48) * turnFactor);
-        const blue = Math.round(48 + (255 - 48) * turnFactor);
+        const turnStrength = Math.abs(turnFactor);
+        const red = Math.round(255 + (40 - 255) * turnStrength);
+        const greenTarget = turnFactor < 0 ? 255 : 123;
+        const blueTarget = turnFactor < 0 ? 40 : 255;
+        const green = Math.round(48 + (greenTarget - 48) * turnStrength);
+        const blue = Math.round(48 + (blueTarget - 48) * turnStrength);
         const color = Phaser.Display.Color.GetColor(red, green, blue);
 
         track.lineStyle(60, color, 0.95);
@@ -258,8 +263,8 @@ function create() {
     createTrack(this);
 
     // === CAR ===
-    const startX = 1000;
-    const startY = 1000;
+    const startX = TRACK_START.x;
+    const startY = TRACK_START.y;
 
     // Front
     carFront = this.matter.add.rectangle(startX, startY - 28, 40, 55, {
@@ -337,7 +342,7 @@ function create() {
     });
 
     // UI
-    this.add.text(16, 16, 'W / ↑  Accelerate\nSpace  Boost\nA D or ← →  Steer\nMouse wheel  Zoom', {
+    this.add.text(16, 16, 'W / ↑  Accelerate\n↓ / Space  Boost\nA D or ← →  Steer\nMouse wheel  Zoom', {
         fontSize: '18px',
         fill: '#ffffff',
         backgroundColor: '#000000aa',
@@ -359,7 +364,7 @@ function update(time, delta) {
 
     // === CONTROLS ===
     const accelerating = cursors.up.isDown || wasd.up.isDown;
-    const boosting = wasd.boost.isDown;
+    const boosting = wasd.boost.isDown || cursors.down.isDown;
     const angle = carFront.angle;
     const forwardX = Math.sin(angle);
     const forwardY = -Math.cos(angle);
