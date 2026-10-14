@@ -1,3 +1,26 @@
+const CAR_CONFIG = {
+    driveForce: 0.08,
+    boostForce: 0.04,
+    maxSpeed: 80,
+    boostMaxSpeed: 100,
+    maxLateralImpulse: 1,
+    angularDampingPerFrame: 0.90,
+    forwardDrag: 0.002,
+    maxTurnRate: 0.07,
+    steeringLockToLockSeconds: 0.25,
+    minimumSteeringSpeed: 0.5,
+    maxRearTurnForceBoost: 0.02
+};
+
+const REAR_TUNING = {
+    density: { atZero: 0.015, atOne: 0.005 },
+    friction: { atZero: 0.008, atOne: 0.08 },
+    frictionAir: { atZero: 0.003, atOne: 0.03 }
+};
+
+const ROAD_TURN_AVERAGE_SEGMENTS = 12;
+const ROAD_FULL_BLUE_TURN_RADIANS = 0.04;
+
 const config = {
     type: Phaser.AUTO,
     width: 800,
@@ -33,6 +56,7 @@ const worldsize = 20000;
 let enginePhase = 0;
 let engineRev = 0;
 let engineFilterState = 0;
+let rearTuningAmount = 0;
 
 function createTrack(scene) {
     const centerX = worldsize / 2;
@@ -91,6 +115,53 @@ function createTrack(scene) {
         const end = (i + 5) % points.length;
         track.lineBetween(points[i].x, points[i].y, points[end].x, points[end].y);
     }
+
+    const segmentTurnFactors = points.map((point, i) => {
+        const next = points[(i + 1) % points.length];
+        const afterNext = points[(i + 2) % points.length];
+        const firstX = next.x - point.x;
+        const firstY = next.y - point.y;
+        const secondX = afterNext.x - next.x;
+        const secondY = afterNext.y - next.y;
+        const cross = firstX * secondY - firstY * secondX;
+        const dot = firstX * secondX + firstY * secondY;
+        const turn = Math.abs(Math.atan2(cross, dot));
+        return Phaser.Math.Clamp(turn / ROAD_FULL_BLUE_TURN_RADIANS, 0, 1);
+    });
+    const averageSegments = Phaser.Math.Clamp(
+        Math.floor(ROAD_TURN_AVERAGE_SEGMENTS),
+        1,
+        points.length
+    );
+
+    for (let i = 0; i < points.length; i++) {
+        let turnFactor = 0;
+        for (let offset = 0; offset < averageSegments; offset++) {
+            turnFactor += segmentTurnFactors[(i + offset) % points.length];
+        }
+        turnFactor /= averageSegments;
+
+        const start = points[i];
+        const end = points[(i + 1) % points.length];
+        const dx = end.x - start.x;
+        const dy = end.y - start.y;
+        const length = Math.hypot(dx, dy);
+        const midpointX = (start.x + end.x) / 2;
+        const midpointY = (start.y + end.y) / 2;
+        const halfLaneWidth = 70;
+        const red = Math.round(255 + (40 - 255) * turnFactor);
+        const green = Math.round(48 + (123 - 48) * turnFactor);
+        const blue = Math.round(48 + (255 - 48) * turnFactor);
+        const color = Phaser.Display.Color.GetColor(red, green, blue);
+
+        track.lineStyle(60, color, 0.95);
+        track.lineBetween(
+            midpointX - dy / length * halfLaneWidth,
+            midpointY + dx / length * halfLaneWidth,
+            midpointX + dy / length * halfLaneWidth,
+            midpointY - dx / length * halfLaneWidth
+        );
+    }
 }
 
 function makeEngineBuffer(ctx, rev, duration = 0.02) {
@@ -98,7 +169,7 @@ function makeEngineBuffer(ctx, rev, duration = 0.02) {
     const length = Math.floor(sampleRate * duration);
     const buffer = ctx.createBuffer(1, length, sampleRate);
     const samples = buffer.getChannelData(0);
-    const baseFreq = 200 + rev * 700;
+    const baseFreq = 200 + rev * 400;
     const filterAmount = 1 - Math.exp(-2 * Math.PI * 1800 / sampleRate);
 
     // Fade in/out duration in samples (~2ms)
@@ -137,6 +208,41 @@ function playProcGenSound(scene, audioBuffer) {
     source.start(0);
 }
 
+function applyLateralGrip(scene, body, maxImpulse) {
+    const rightX = Math.cos(body.angle);
+    const rightY = Math.sin(body.angle);
+    const lateralSpeed = body.velocity.x * rightX + body.velocity.y * rightY;
+    const impulse = Phaser.Math.Clamp(-lateralSpeed * body.mass, -maxImpulse, maxImpulse);
+    const velocityChange = impulse / body.mass;
+
+    scene.matter.body.setVelocity(body, {
+        x: body.velocity.x + rightX * velocityChange,
+        y: body.velocity.y + rightY * velocityChange
+    });
+}
+
+function applyForwardDrag(scene, body, forwardX, forwardY, forwardSpeed) {
+    const drag = -forwardSpeed * CAR_CONFIG.forwardDrag;
+    scene.matter.body.applyForce(body, body.position, {
+        x: forwardX * drag,
+        y: forwardY * drag
+    });
+}
+
+function updateRearTuning(scene, amount, output) {
+    rearTuningAmount = Phaser.Math.Clamp(amount, 0, 1);
+    const interpolate = ({ atZero, atOne }) => atZero + (atOne - atZero) * amount;
+    const density = interpolate(REAR_TUNING.density);
+    const friction = interpolate(REAR_TUNING.friction);
+    const frictionAir = interpolate(REAR_TUNING.frictionAir);
+    const turnForceBoost = CAR_CONFIG.maxRearTurnForceBoost * (1 - rearTuningAmount);
+
+    scene.matter.body.setDensity(carRear, density);
+    carRear.friction = friction;
+    carRear.frictionAir = frictionAir;
+    output.textContent = `Density ${density.toFixed(3)} | Friction ${friction.toFixed(3)} | Air ${frictionAir.toFixed(3)} | Turn boost ${turnForceBoost.toFixed(2)}`;
+}
+
 function create() {
     playProcGenSound(this, makeEngineBuffer(this.sound.context, engineRev));
 
@@ -166,12 +272,22 @@ function create() {
 
     // Rear
     carRear = this.matter.add.rectangle(startX, startY + 28, 46, 55, {
-        friction: 0.08,
-        frictionAir: 0.03,
+        friction: 0.008,
+        frictionAir: 0.003,
         restitution: 0.1,
-        density: 0.005,
+        density: 0.015,
         chamfer: { radius: 6 },
     });
+
+    const rearTuningSlider = document.getElementById('rear-tuning-slider');
+    const rearTuningOutput = document.getElementById('rear-tuning-output');
+    const applyRearTuning = () => updateRearTuning(
+        this,
+        Number(rearTuningSlider.value),
+        rearTuningOutput
+    );
+    rearTuningSlider.addEventListener('input', applyRearTuning);
+    applyRearTuning();
 
     // Two soft springs, side by side, to keep the body from acting like one rigid link
     this.matter.add.spring(carFront, carRear, 56, 1, {
@@ -244,29 +360,57 @@ function update(time, delta) {
     // === CONTROLS ===
     const accelerating = cursors.up.isDown || wasd.up.isDown;
     const boosting = wasd.boost.isDown;
-    const force = (accelerating ? 0.04 : 0) + (boosting ? 0.03 : 0);
-    const turn = 0.06;
-
     const angle = carFront.angle;
+    const forwardX = Math.sin(angle);
+    const forwardY = -Math.cos(angle);
+    const forwardSpeed = carFront.velocity.x * forwardX + carFront.velocity.y * forwardY;
+    const maxSpeed = boosting ? CAR_CONFIG.boostMaxSpeed : CAR_CONFIG.maxSpeed;
+    const force = (accelerating ? CAR_CONFIG.driveForce : 0)
+        + (boosting ? CAR_CONFIG.boostForce : 0);
 
-    // Accelerate in facing direction
-    if (force > 0) {
+    // Drive force stops at the speed cap; it never assigns the car's speed directly.
+    if (force > 0 && forwardSpeed < maxSpeed) {
         this.matter.body.applyForce(carFront, carFront.position, {
-            x: Math.sin(angle) * force,
-            y: -Math.cos(angle) * force
+            x: forwardX * force,
+            y: forwardY * force
         });
     }
 
-    // Steering
-    if (cursors.left.isDown || wasd.left.isDown) {
-        this.matter.body.setAngularVelocity(carFront, -turn);
-        //this.matter.body.setAngularVelocity(carRear, -turn * 0.75);
-    } else if (cursors.right.isDown || wasd.right.isDown) {
-        this.matter.body.setAngularVelocity(carFront, turn);
-        //this.matter.body.setAngularVelocity(carRear, turn * 0.75);
+    applyForwardDrag(this, carFront, forwardX, forwardY, forwardSpeed);
+    applyLateralGrip(this, carFront, CAR_CONFIG.maxLateralImpulse);
+    applyLateralGrip(this, carRear, CAR_CONFIG.maxLateralImpulse);
+
+    const steeringInput = (cursors.left.isDown || wasd.left.isDown ? -1 : 0)
+        + (cursors.right.isDown || wasd.right.isDown ? 1 : 0);
+    const moving = Math.hypot(carFront.velocity.x, carFront.velocity.y)
+        > CAR_CONFIG.minimumSteeringSpeed;
+    const targetTurnRate = moving ? steeringInput * CAR_CONFIG.maxTurnRate : 0;
+    const frameScale = delta / (1000 / 60);
+    const turnRateStep = CAR_CONFIG.maxTurnRate * 2
+        * delta / (CAR_CONFIG.steeringLockToLockSeconds * 1000);
+    const dampedTurnRate = carFront.angularVelocity
+        * Math.pow(CAR_CONFIG.angularDampingPerFrame, frameScale);
+
+    const turnForceBoost = CAR_CONFIG.maxRearTurnForceBoost * (1 - rearTuningAmount);
+    if (moving && steeringInput !== 0 && turnForceBoost > 0) {
+        const rightX = Math.cos(angle);
+        const rightY = Math.sin(angle);
+        this.matter.body.applyForce(carFront, {
+            x: carFront.position.x + forwardX * 27,
+            y: carFront.position.y + forwardY * 27
+        }, {
+            x: rightX * steeringInput * turnForceBoost,
+            y: rightY * steeringInput * turnForceBoost
+        });
     }
-    this.matter.body.setAngularVelocity(carFront, carFront.angularVelocity * 0.90);
-    this.matter.body.setAngularVelocity(carRear, carRear.angularVelocity * 0.90);
+
+    this.matter.body.setAngularVelocity(carFront, Phaser.Math.Clamp(
+        targetTurnRate,
+        dampedTurnRate - turnRateStep,
+        dampedTurnRate + turnRateStep
+    ));
+    this.matter.body.setAngularVelocity(carRear, carRear.angularVelocity
+        * Math.pow(CAR_CONFIG.angularDampingPerFrame, frameScale));
 
     // Simple skid marks: draw behind the rear wheels when the car is moving and turning/accelerating
     const speed = Math.hypot(carRear.velocity.x, carRear.velocity.y);

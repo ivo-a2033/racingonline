@@ -19,9 +19,45 @@
             border: 2px solid #4a4a6a;
             border-radius: 4px;
         }
+        #rear-tuning {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            z-index: 10;
+            width: min(280px, calc(100vw - 32px));
+            padding: 12px 14px;
+            color: #f4f4f6;
+            background: #17171de8;
+            border: 1px solid #555565;
+            border-radius: 4px;
+            font: 14px/1.4 sans-serif;
+        }
+        #rear-tuning label {
+            display: block;
+            margin-bottom: 6px;
+            font-weight: 600;
+        }
+        #rear-tuning input {
+            display: block;
+            width: 100%;
+            accent-color: #00cc88;
+        }
+        #rear-tuning-output {
+            display: block;
+            margin-top: 6px;
+            color: #c7c7d0;
+            font-size: 12px;
+            font-variant-numeric: tabular-nums;
+        }
     </style>
 </head>
 <body>
+    <aside id="rear-tuning">
+        <label for="rear-tuning-slider">Rear setup</label>
+        <input id="rear-tuning-slider" type="range" min="0" max="1" step="0.01" value="0"
+            aria-label="Rear density, friction, and air friction">
+        <output id="rear-tuning-output" aria-live="polite"></output>
+    </aside>
     <!-- Phaser 3 from CDN -->
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
     <script src="game.js"></script>
