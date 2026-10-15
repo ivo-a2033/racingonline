@@ -20,6 +20,8 @@ const REAR_TUNING = {
 
 const ROAD_TURN_AVERAGE_SEGMENTS = 12;
 const ROAD_FULL_BLUE_TURN_RADIANS = 0.04;
+const TRACK_TEXTURE_SIZE = 512;
+const TRACK_ROAD_HALF_WIDTH = 290;
 
 const config = {
     type: Phaser.AUTO,
@@ -30,12 +32,13 @@ const config = {
         default: 'matter',
         matter: {
             gravity: { y: 0 },
-            debug: true,               // ← shows the physics bodies clearly
+            debug: false,
             debugBodyColor: 0x00ff88,
             debugWireframes: true
         }
     },
     scene: {
+        preload: preload,
         create: create,
         update: update
     }
@@ -58,6 +61,10 @@ let enginePhase = 0;
 let engineRev = 0;
 let engineFilterState = 0;
 let rearTuningAmount = 0;
+
+function preload() {
+    this.load.image('car', '/car.png');
+}
 
 function createTrack(scene) {
     const centerX = worldsize / 2;
@@ -99,25 +106,6 @@ function createTrack(scene) {
         });
     }
 
-    const track = scene.add.graphics().setDepth(-1);
-    track.lineStyle(580, 0x252530, 1);
-    track.beginPath();
-    track.moveTo(points[0].x, points[0].y);
-    for (let i = 1; i < points.length; i++) {
-        track.lineTo(points[i].x, points[i].y);
-    }
-    track.closePath();
-    track.strokePath();
-
-    track.lineStyle(140, 0x555566, 1);
-    track.strokePath();
-
-    track.lineStyle(5, 0xd8d2a8, 0.8);
-    for (let i = 0; i < points.length; i += 12) {
-        const end = (i + 5) % points.length;
-        track.lineBetween(points[i].x, points[i].y, points[end].x, points[end].y);
-    }
-
     const segmentTurnFactors = points.map((point, i) => {
         const next = points[(i + 1) % points.length];
         const afterNext = points[(i + 2) % points.length];
@@ -135,38 +123,132 @@ function createTrack(scene) {
         1,
         points.length
     );
-
-    for (let i = 0; i < points.length; i++) {
+    const segments = points.map((start, i) => {
         let turnFactor = 0;
         for (let offset = 0; offset < averageSegments; offset++) {
             turnFactor += segmentTurnFactors[(i + offset) % points.length];
         }
         turnFactor /= averageSegments;
 
-        const start = points[i];
         const end = points[(i + 1) % points.length];
         const dx = end.x - start.x;
         const dy = end.y - start.y;
         const length = Math.hypot(dx, dy);
-        const midpointX = (start.x + end.x) / 2;
-        const midpointY = (start.y + end.y) / 2;
-        const halfLaneWidth = 70;
         const turnStrength = Math.abs(turnFactor);
         const red = Math.round(255 + (40 - 255) * turnStrength);
         const greenTarget = turnFactor < 0 ? 255 : 123;
         const blueTarget = turnFactor < 0 ? 40 : 255;
         const green = Math.round(48 + (greenTarget - 48) * turnStrength);
         const blue = Math.round(48 + (blueTarget - 48) * turnStrength);
-        const color = Phaser.Display.Color.GetColor(red, green, blue);
 
-        track.lineStyle(60, color, 0.95);
-        track.lineBetween(
-            midpointX - dy / length * halfLaneWidth,
-            midpointY + dx / length * halfLaneWidth,
-            midpointX + dy / length * halfLaneWidth,
-            midpointY - dx / length * halfLaneWidth
-        );
+        return {
+            start,
+            end,
+            dx,
+            dy,
+            length,
+            midpointX: (start.x + end.x) / 2,
+            midpointY: (start.y + end.y) / 2,
+            color: Phaser.Display.Color.GetColor(red, green, blue)
+        };
+    });
+
+    const tiles = new Map();
+    for (const segment of segments) {
+        const minTileX = Math.floor((Math.min(segment.start.x, segment.end.x)
+            - TRACK_ROAD_HALF_WIDTH) / TRACK_TEXTURE_SIZE);
+        const maxTileX = Math.floor((Math.max(segment.start.x, segment.end.x)
+            + TRACK_ROAD_HALF_WIDTH) / TRACK_TEXTURE_SIZE);
+        const minTileY = Math.floor((Math.min(segment.start.y, segment.end.y)
+            - TRACK_ROAD_HALF_WIDTH) / TRACK_TEXTURE_SIZE);
+        const maxTileY = Math.floor((Math.max(segment.start.y, segment.end.y)
+            + TRACK_ROAD_HALF_WIDTH) / TRACK_TEXTURE_SIZE);
+
+        for (let tileY = minTileY; tileY <= maxTileY; tileY++) {
+            for (let tileX = minTileX; tileX <= maxTileX; tileX++) {
+                tiles.set(`${tileX},${tileY}`, { x: tileX, y: tileY });
+            }
+        }
     }
+
+    const track = scene.add.graphics();
+    let tileIndex = 0;
+    for (const tile of tiles.values()) {
+        const tileX = tile.x * TRACK_TEXTURE_SIZE;
+        const tileY = tile.y * TRACK_TEXTURE_SIZE;
+        const minX = tileX - TRACK_ROAD_HALF_WIDTH;
+        const maxX = tileX + TRACK_TEXTURE_SIZE + TRACK_ROAD_HALF_WIDTH;
+        const minY = tileY - TRACK_ROAD_HALF_WIDTH;
+        const maxY = tileY + TRACK_TEXTURE_SIZE + TRACK_ROAD_HALF_WIDTH;
+        const intersectsTile = (x1, y1, x2, y2, padding = 0) =>
+            Math.max(x1, x2) + padding >= minX
+            && Math.min(x1, x2) - padding <= maxX
+            && Math.max(y1, y2) + padding >= minY
+            && Math.min(y1, y2) - padding <= maxY;
+
+        track.clear();
+        track.lineStyle(580, 0x252530, 1);
+        for (const segment of segments) {
+            if (intersectsTile(segment.start.x, segment.start.y, segment.end.x, segment.end.y)) {
+                track.lineBetween(
+                    segment.start.x - tileX,
+                    segment.start.y - tileY,
+                    segment.end.x - tileX,
+                    segment.end.y - tileY
+                );
+            }
+        }
+
+        track.lineStyle(140, 0x555566, 1);
+        for (const segment of segments) {
+            if (intersectsTile(segment.start.x, segment.start.y, segment.end.x, segment.end.y)) {
+                track.lineBetween(
+                    segment.start.x - tileX,
+                    segment.start.y - tileY,
+                    segment.end.x - tileX,
+                    segment.end.y - tileY
+                );
+            }
+        }
+
+        track.lineStyle(5, 0xd8d2a8, 0.8);
+        for (let i = 0; i < points.length; i += 12) {
+            const start = points[i];
+            const end = points[(i + 5) % points.length];
+            if (intersectsTile(start.x, start.y, end.x, end.y, 3)) {
+                track.lineBetween(
+                    start.x - tileX,
+                    start.y - tileY,
+                    end.x - tileX,
+                    end.y - tileY
+                );
+            }
+        }
+
+        for (const segment of segments) {
+            if (!intersectsTile(segment.start.x, segment.start.y, segment.end.x, segment.end.y)) {
+                continue;
+            }
+
+            track.lineStyle(60, segment.color, 0.95);
+            const halfLaneWidth = 70;
+            track.lineBetween(
+                segment.midpointX - segment.dy / segment.length * halfLaneWidth - tileX,
+                segment.midpointY + segment.dx / segment.length * halfLaneWidth - tileY,
+                segment.midpointX + segment.dy / segment.length * halfLaneWidth - tileX,
+                segment.midpointY - segment.dx / segment.length * halfLaneWidth - tileY
+            );
+        }
+
+        const textureKey = `track-tile-${tileIndex++}`;
+        track.generateTexture(textureKey, TRACK_TEXTURE_SIZE, TRACK_TEXTURE_SIZE);
+        scene.add.image(
+            tileX + TRACK_TEXTURE_SIZE / 2,
+            tileY + TRACK_TEXTURE_SIZE / 2,
+            textureKey
+        ).setDepth(-1);
+    }
+    track.destroy();
 }
 
 function makeEngineBuffer(ctx, rev, duration = 0.02) {
@@ -253,8 +335,14 @@ function create() {
 
     socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
     socket.onmessage = ({ data }) => JSON.parse(data).forEach(p => {
-        const ghost = ghosts[p.id] ||= this.add.rectangle(0, 0, 40, 55, 0xff0000, 0.35).setDepth(4);
-        ghost.setPosition(p.x, p.y).setRotation(p.rot);
+        const ghost = ghosts[p.id] ||= {
+            body: this.add.rectangle(0, 0, 40, 55, 0xff0000, 0).setDepth(4),
+            car: this.add.image(0, 0, 'car').setDisplaySize(46, 97).setAlpha(0.7).setDepth(6)
+        };
+        ghost.body.setPosition(p.x, p.y).setRotation(p.rot);
+        const forwardX = Math.sin(p.rot);
+        const forwardY = -Math.cos(p.rot);
+        ghost.car.setPosition(p.x - forwardX * 28, p.y - forwardY * 28).setRotation(p.rot);
     });
 
     // Big world
@@ -314,8 +402,12 @@ function create() {
     });
 
     // Colored visual bodies (on top of debug wireframes)
-    this.frontGfx = this.add.rectangle(0, 0, 40, 55, 0x00ff88, 0.85).setDepth(5);
-    this.rearGfx  = this.add.rectangle(0, 0, 46, 55, 0x00cc66, 0.85).setDepth(5);
+    this.frontGfx = this.add.rectangle(0, 0, 40, 55, 0x00ff88, 0).setDepth(5);
+    this.rearGfx  = this.add.rectangle(0, 0, 46, 55, 0x00cc66, 0).setDepth(5);
+    this.carGfx = this.add.image(0, 0, 'car')
+        .setDisplaySize(46, 97)
+        .setAlpha(1)
+        .setDepth(6);
 
     this.skidGfx = this.add.graphics().setDepth(6);
     skidMarks = [];
@@ -361,6 +453,11 @@ function update(time, delta) {
 
     this.rearGfx.setPosition(carRear.position.x, carRear.position.y);
     this.rearGfx.setRotation(carRear.angle);
+    this.carGfx.setPosition(
+        (carFront.position.x + carRear.position.x) / 2,
+        (carFront.position.y + carRear.position.y) / 2
+    );
+    this.carGfx.setRotation(carFront.angle);
 
     // === CONTROLS ===
     const accelerating = cursors.up.isDown || wasd.up.isDown;

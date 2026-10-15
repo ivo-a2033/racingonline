@@ -1,8 +1,23 @@
+from pathlib import Path
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 players = {}
+
+
+@app.get("/car.png")
+async def car_image():
+    return FileResponse(Path(__file__).resolve().parent / "car.png", media_type="image/png")
 
 
 @app.websocket("/ws")
