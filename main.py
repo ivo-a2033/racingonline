@@ -17,7 +17,7 @@ players = {}
 
 @app.get("/car.png")
 async def car_image():
-    return FileResponse(Path(__file__).resolve().parent / "car.png", media_type="image/png")
+    return FileResponse(Path(__file__).resolve().parent / "car2.png", media_type="image/png")
 
 
 @app.get("/audio/pickup-coin-{number}.wav")

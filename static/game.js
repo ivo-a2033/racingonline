@@ -23,7 +23,7 @@ const GAUGE_CONFIG = {
 };
 
 const AUDIO_CONFIG = {
-    engineSound: 'combined',
+    engineSound: 'muted',
     lowPassFrequency: 1000
 };
 
@@ -47,7 +47,7 @@ const PICKUP_CONFIG = {
            { width: 132, height: 132, color: 0x39ff14, rotationSpeed: 0.9 }
     ]
 };
-const PICKUP_AUDIO_KEYS = ['pickup-2', 'pickup-3', 'pickup-4'];
+const PICKUP_AUDIO_KEYS = ['pickup-2'];
 
 const config = {
     type: Phaser.AUTO,
@@ -74,7 +74,7 @@ const game = new Phaser.Game(config);
 
 let carFront, carRear;
 let cursors, wasd;
-let zoom = 1.0;
+let zoom = 0.8;
 let skidMarks = [];
 let lastRearLeft = null;
 let lastRearRight = null;
@@ -221,7 +221,7 @@ function createTrack(scene) {
         track.clear();
         track.lineStyle(TRACK_ROAD_WIDTH, 0x252530, 1);
         for (const segment of segments) {
-            if (intersectsTile(segment.start.x, segment.start.y, segment.end.x, segment.end.y)) {
+            if (intersectsTile(segment.start.x, segment.start.y, segment.end.x, segment.end.y, 20)) {
                 const overshootX = segment.dx / segment.length * 20;
                 const overshootY = segment.dy / segment.length * 20;
                 track.lineBetween(
@@ -260,11 +260,17 @@ function createTrack(scene) {
         }
 
         for (const segment of segments) {
-            if (!intersectsTile(segment.start.x, segment.start.y, segment.end.x, segment.end.y)) {
+            if (!intersectsTile(
+                segment.start.x,
+                segment.start.y,
+                segment.end.x,
+                segment.end.y,
+                TRACK_STRIP_WIDTH / 2 + 20
+            )) {
                 continue;
             }
 
-            track.lineStyle(TRACK_STRIP_WIDTH, segment.color, 0.95);
+            track.lineStyle(TRACK_STRIP_WIDTH + 40, segment.color, 0.6);
             const halfLaneWidth = 70;
             track.lineBetween(
                 segment.midpointX - segment.dy / segment.length * halfLaneWidth - tileX,
@@ -332,7 +338,9 @@ function makeEngineBuffer(ctx, rev, duration = 0.02) {
                 : classicPulse;
         const subRumble = Math.sin(Math.PI * enginePhase);
         
-        let sample = Math.tanh(pulse * 0.35 + subRumble * 0.45);
+        let sample = AUDIO_CONFIG.engineSound === 'muted'
+            ? 0
+            : Math.tanh(pulse * 0.35 + subRumble * 0.45);
 
         // Apply linear fade-in at start
         if (i < fadeSamples) {
@@ -578,10 +586,11 @@ function create() {
     // Camera
     this.cameras.main.setBounds(0, 0, worldsize, worldsize);
     this.cameras.main.startFollow(this.frontGfx);
+    this.cameras.main.setZoom(zoom);
 
     // Zoom
     this.input.on('wheel', (pointer, gameObjects, deltaX, deltaY) => {
-        zoom = Phaser.Math.Clamp(zoom - deltaY * 0.001, 0.035, 2.5);
+        zoom = Phaser.Math.Clamp(zoom - deltaY * 0.0005, 0.035, 2.5);
         this.cameras.main.setZoom(zoom);
     });
 
@@ -754,14 +763,14 @@ function update(time, delta) {
             const dx = rearLeft.x - lastRearLeft.x;
             const dy = rearLeft.y - lastRearLeft.y;
             if (Math.hypot(dx, dy) > 3) {
-                skidMarks.push({ x1: lastRearLeft.x, y1: lastRearLeft.y, x2: rearLeft.x, y2: rearLeft.y, life: 900 });
+                skidMarks.push({ x1: lastRearLeft.x, y1: lastRearLeft.y, x2: rearLeft.x, y2: rearLeft.y, life: 450 });
             }
         }
         if (lastRearRight) {
             const dx = rearRight.x - lastRearRight.x;
             const dy = rearRight.y - lastRearRight.y;
             if (Math.hypot(dx, dy) > 3) {
-                skidMarks.push({ x1: lastRearRight.x, y1: lastRearRight.y, x2: rearRight.x, y2: rearRight.y, life: 900 });
+                skidMarks.push({ x1: lastRearRight.x, y1: lastRearRight.y, x2: rearRight.x, y2: rearRight.y, life: 450 });
             }
         }
 
@@ -781,7 +790,7 @@ function update(time, delta) {
             continue;
         }
 
-        const alpha = mark.life / 900;
+        const alpha = mark.life / 450;
         this.skidGfx.lineStyle(6, 0x101010, alpha);
         this.skidGfx.lineBetween(mark.x1, mark.y1, mark.x2, mark.y2);
     }
