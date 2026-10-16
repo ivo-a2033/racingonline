@@ -8,8 +8,23 @@ const CAR_CONFIG = {
     forwardDrag: 0.002,
     maxTurnRate: 0.07,
     steeringLockToLockSeconds: 0.25,
+    accelerationResponseSeconds: 0.18,
     minimumSteeringSpeed: 0.5,
     maxRearTurnForceBoost: 0.02
+};
+
+const GAUGE_CONFIG = {
+    accelerationMax: 1,
+    speedMax: 40,
+    arcDegrees: 300,
+    radius: 96,
+    combinedRadius: 124,
+    combinedInnerRadius: 96
+};
+
+const AUDIO_CONFIG = {
+    engineSound: 'combined',
+    lowPassFrequency: 1000
 };
 
 const REAR_TUNING = {
@@ -22,6 +37,17 @@ const ROAD_TURN_AVERAGE_SEGMENTS = 12;
 const ROAD_FULL_BLUE_TURN_RADIANS = 0.04;
 const TRACK_TEXTURE_SIZE = 512;
 const TRACK_ROAD_HALF_WIDTH = 290;
+const TRACK_ROAD_WIDTH = TRACK_ROAD_HALF_WIDTH * 2;
+const TRACK_STRIP_WIDTH = 60;
+const TRACK_STRIPE_INTERVAL = 30;
+const PICKUP_CONFIG = {
+    rectangles: [
+           { width: 48, height: 48, color: 0x00b83f, rotationSpeed: 2.4 },
+           { width: 88, height: 88, color: 0x00e84a, rotationSpeed: -1.6 },
+           { width: 132, height: 132, color: 0x39ff14, rotationSpeed: 0.9 }
+    ]
+};
+const PICKUP_AUDIO_KEYS = ['pickup-2', 'pickup-3', 'pickup-4'];
 
 const config = {
     type: Phaser.AUTO,
@@ -61,9 +87,15 @@ let enginePhase = 0;
 let engineRev = 0;
 let engineFilterState = 0;
 let rearTuningAmount = 0;
+let accelerationAmount = 0;
+let boostAmount = 0;
+let gaugeMode = 'split';
 
 function preload() {
     this.load.image('car', '/car.png');
+    this.load.audio('pickup-2', '/audio/pickup-coin-2.wav');
+    this.load.audio('pickup-3', '/audio/pickup-coin-3.wav');
+    this.load.audio('pickup-4', '/audio/pickup-coin-4.wav');
 }
 
 function createTrack(scene) {
@@ -74,7 +106,7 @@ function createTrack(scene) {
     const bendScale = startRadius / Math.hypot(1000 - centerX, 1000 - centerY);
     const margin = 600;
     const bends = [
-        { frequency: 3, cosine: 650 + Math.random() * 250, sine: 500 + Math.random() * 300 },
+        { frequency: 3, cosine: 3650 + Math.random() * 250, sine: 500 + Math.random() * 300 },
         { frequency: 5, cosine: 450 + Math.random() * 250, sine: 350 + Math.random() * 250 },
         { frequency: 7, cosine: 300 + Math.random() * 200, sine: 1250 + Math.random() * 200 },
         { frequency: 11, cosine: 180 + Math.random() * 160, sine: 150 + Math.random() * 150 }
@@ -187,14 +219,16 @@ function createTrack(scene) {
             && Math.min(y1, y2) - padding <= maxY;
 
         track.clear();
-        track.lineStyle(580, 0x252530, 1);
+        track.lineStyle(TRACK_ROAD_WIDTH, 0x252530, 1);
         for (const segment of segments) {
             if (intersectsTile(segment.start.x, segment.start.y, segment.end.x, segment.end.y)) {
+                const overshootX = segment.dx / segment.length * 20;
+                const overshootY = segment.dy / segment.length * 20;
                 track.lineBetween(
-                    segment.start.x - tileX,
-                    segment.start.y - tileY,
-                    segment.end.x - tileX,
-                    segment.end.y - tileY
+                    segment.start.x - overshootX - tileX,
+                    segment.start.y - overshootY - tileY,
+                    segment.end.x + overshootX - tileX,
+                    segment.end.y + overshootY - tileY
                 );
             }
         }
@@ -211,11 +245,11 @@ function createTrack(scene) {
             }
         }
 
-        track.lineStyle(5, 0xd8d2a8, 0.8);
-        for (let i = 0; i < points.length; i += 12) {
+        track.lineStyle(9, 0xd8d2a8, 0.8);
+        for (let i = 0; i < points.length; i += TRACK_STRIPE_INTERVAL) {
             const start = points[i];
             const end = points[(i + 5) % points.length];
-            if (intersectsTile(start.x, start.y, end.x, end.y, 3)) {
+            if (intersectsTile(start.x, start.y, end.x, end.y, 6)) {
                 track.lineBetween(
                     start.x - tileX,
                     start.y - tileY,
@@ -230,7 +264,7 @@ function createTrack(scene) {
                 continue;
             }
 
-            track.lineStyle(60, segment.color, 0.95);
+            track.lineStyle(TRACK_STRIP_WIDTH, segment.color, 0.95);
             const halfLaneWidth = 70;
             track.lineBetween(
                 segment.midpointX - segment.dy / segment.length * halfLaneWidth - tileX,
@@ -249,6 +283,28 @@ function createTrack(scene) {
         ).setDepth(-1);
     }
     track.destroy();
+    const stripePositions = points.filter((point, index) => index % TRACK_STRIPE_INTERVAL === 0);
+    const closestStripeIndex = stripePositions.reduce((closestIndex, position, index) => {
+        const closestPosition = stripePositions[closestIndex];
+        return Math.hypot(position.x - TRACK_START.x, position.y - TRACK_START.y)
+            < Math.hypot(closestPosition.x - TRACK_START.x, closestPosition.y - TRACK_START.y)
+            ? index
+            : closestIndex;
+    }, 0);
+    const firstPositionIndex = (closestStripeIndex - 2 + stripePositions.length)
+        % stripePositions.length;
+    return stripePositions.map((_, offset) =>
+        stripePositions[(firstPositionIndex + offset) % stripePositions.length]
+    );
+}
+
+function spawnNextPickup(scene) {
+    const position = scene.trackStripePositions[scene.nextPickupPositionIndex];
+    scene.nextPickupPositionIndex = (scene.nextPickupPositionIndex + 1)
+        % scene.trackStripePositions.length;
+    scene.pickupRectangles.forEach(rectangle => {
+        rectangle.setPosition(position.x, position.y).setRotation(0).setVisible(true);
+    });
 }
 
 function makeEngineBuffer(ctx, rev, duration = 0.02) {
@@ -256,7 +312,7 @@ function makeEngineBuffer(ctx, rev, duration = 0.02) {
     const length = Math.floor(sampleRate * duration);
     const buffer = ctx.createBuffer(1, length, sampleRate);
     const samples = buffer.getChannelData(0);
-    const baseFreq = 200 + rev * 400;
+    const baseFreq = 220 + rev * 200;
     const filterAmount = 1 - Math.exp(-2 * Math.PI * 1800 / sampleRate);
 
     // Fade in/out duration in samples (~2ms)
@@ -264,11 +320,19 @@ function makeEngineBuffer(ctx, rev, duration = 0.02) {
 
     for (let i = 0; i < length; i++) {
         const noise = Math.random() * 2 - 1;
-        const pulse = Math.sin(2 * Math.PI * enginePhase)
-            + 0.35 * Math.sin(4 * Math.PI * enginePhase);
+        const cyclePhase = enginePhase % 1;
+        const buzzPulse = 0.7 * (2 * cyclePhase - 1)
+            + 0.3 * Math.sin(4 * Math.PI * enginePhase);
+        const classicPulse = Math.sin(2 * Math.PI * enginePhase)
+            + 0.35 * Math.sin(3 * Math.PI * enginePhase);
+        const pulse = AUDIO_CONFIG.engineSound === 'buzzsaw'
+            ? buzzPulse
+            : AUDIO_CONFIG.engineSound === 'combined'
+                ? (buzzPulse + classicPulse) * 0.5
+                : classicPulse;
         const subRumble = Math.sin(Math.PI * enginePhase);
         
-        let sample = Math.tanh(noise * 0.25 + pulse * 0.35 + subRumble * 0.15);
+        let sample = Math.tanh(pulse * 0.35 + subRumble * 0.45);
 
         // Apply linear fade-in at start
         if (i < fadeSamples) {
@@ -288,9 +352,19 @@ function makeEngineBuffer(ctx, rev, duration = 0.02) {
 }
 function playProcGenSound(scene, audioBuffer) {
     const ctx = scene.sound.context;
+    if (!scene.engineLowPassFilter) {
+        scene.engineLowPassFilter = ctx.createBiquadFilter();
+        scene.engineLowPassFilter.type = 'lowpass';
+        scene.engineLowPassFilter.frequency.setValueAtTime(
+            AUDIO_CONFIG.lowPassFrequency,
+            ctx.currentTime
+        );
+        scene.engineLowPassFilter.connect(scene.sound.masterVolumeNode || ctx.destination);
+    }
+
     const source = ctx.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(scene.sound.masterVolumeNode || ctx.destination);
+    source.connect(scene.engineLowPassFilter);
     source.onended = () => playProcGenSound(scene, makeEngineBuffer(ctx, engineRev));
     source.start(0);
 }
@@ -330,6 +404,48 @@ function updateRearTuning(scene, amount, output) {
     output.textContent = `Density ${density.toFixed(3)} | Friction ${friction.toFixed(3)} | Air ${frictionAir.toFixed(3)} | Turn boost ${turnForceBoost.toFixed(2)}`;
 }
 
+function drawGauge(
+    graphics,
+    centerX,
+    centerY,
+    value,
+    maxValue,
+    label,
+    valueText,
+    radius = GAUGE_CONFIG.radius,
+    textX = centerX,
+    labelY = centerY + 8,
+    valueY = centerY + 30
+) {
+    const startAngle = Phaser.Math.DegToRad(120);
+    const endAngle = startAngle + Phaser.Math.DegToRad(GAUGE_CONFIG.arcDegrees);
+    const amount = Phaser.Math.Clamp(value / maxValue, 0, 1);
+    const color = Phaser.Display.Color.Interpolate.ColorWithColor(
+        new Phaser.Display.Color(40, 230, 125),
+        new Phaser.Display.Color(255, 55, 55),
+        100,
+        Math.round(amount * 100)
+    );
+    const colorValue = Phaser.Display.Color.GetColor(color.r, color.g, color.b);
+
+    graphics.clear();
+    graphics.lineStyle(2, 0x52615c, 0.7);
+    graphics.beginPath();
+    graphics.arc(centerX, centerY, radius, startAngle, endAngle, false);
+    graphics.strokePath();
+
+    if (amount > 0) {
+        graphics.lineStyle(3 + amount * 11, colorValue, 1);
+        graphics.beginPath();
+        graphics.arc(centerX, centerY, radius, startAngle,
+            startAngle + (endAngle - startAngle) * amount, false);
+        graphics.strokePath();
+    }
+
+    label.setPosition(textX, labelY).setOrigin(0.5);
+    valueText.setPosition(textX, valueY).setOrigin(0.5).setText(value.toFixed(0));
+}
+
 function create() {
     playProcGenSound(this, makeEngineBuffer(this.sound.context, engineRev));
 
@@ -348,7 +464,14 @@ function create() {
     // Big world
     this.matter.world.setBounds(0, 0, worldsize, worldsize);
 
-    createTrack(this);
+    this.trackStripePositions = createTrack(this);
+    this.nextPickupPositionIndex = 2;
+    this.pickupRectangles = PICKUP_CONFIG.rectangles.map(({ width, height, color }) =>
+        this.add.rectangle(0, 0, width, height, color, 0.12)
+                .setStrokeStyle(6, color, 1)
+            .setDepth(8)
+    );
+    spawnNextPickup(this);
 
     // === CAR ===
     const startX = TRACK_START.x;
@@ -410,6 +533,35 @@ function create() {
         .setDepth(6);
 
     this.skidGfx = this.add.graphics().setDepth(6);
+    this.accelerationGauge = this.add.graphics().setScrollFactor(0).setDepth(20);
+    this.speedGauge = this.add.graphics().setScrollFactor(0).setDepth(20);
+    this.accelerationGaugeLabel = this.add.text(0, 0, 'REV / ACCEL', {
+        fontSize: '11px',
+        color: '#dce6df',
+        fontStyle: 'bold'
+    }).setScrollFactor(0).setDepth(21);
+    this.accelerationGaugeValue = this.add.text(0, 0, '0', {
+        fontSize: '18px',
+        color: '#ffffff'
+    }).setScrollFactor(0).setDepth(21);
+    this.speedGaugeLabel = this.add.text(0, 0, 'SPEED', {
+        fontSize: '11px',
+        color: '#dce6df',
+        fontStyle: 'bold'
+    }).setScrollFactor(0).setDepth(21);
+    this.speedGaugeValue = this.add.text(0, 0, '0', {
+        fontSize: '22px',
+        color: '#ffffff'
+    }).setScrollFactor(0).setDepth(21);
+    const gaugeModeButton = document.getElementById('gauge-mode-button');
+    gaugeModeButton.addEventListener('click', () => {
+        gaugeMode = gaugeMode === 'split' ? 'combined' : 'split';
+        gaugeModeButton.textContent = `Gauges: ${gaugeMode}`;
+        gaugeModeButton.setAttribute('aria-pressed', String(gaugeMode === 'combined'));
+    });
+    document.getElementById('engine-sound-mode').addEventListener('change', (event) => {
+        AUDIO_CONFIG.engineSound = event.target.value;
+    });
     skidMarks = [];
     lastRearLeft = null;
     lastRearRight = null;
@@ -459,6 +611,17 @@ function update(time, delta) {
     );
     this.carGfx.setRotation(carFront.angle);
 
+    const pickupX = this.pickupRectangles[0].x;
+    const pickupY = this.pickupRectangles[0].y;
+    if (Math.hypot(carFront.position.x - pickupX, carFront.position.y - pickupY)
+        <= TRACK_ROAD_WIDTH / 2 * 1.2) { // 20% margin of error
+        PICKUP_AUDIO_KEYS.forEach(key => this.sound.play(key));
+        spawnNextPickup(this);
+    }
+    PICKUP_CONFIG.rectangles.forEach((rectangle, index) => {
+        this.pickupRectangles[index].rotation += rectangle.rotationSpeed * delta / 1000;
+    });
+
     // === CONTROLS ===
     const accelerating = cursors.up.isDown || wasd.up.isDown;
     const boosting = wasd.boost.isDown || cursors.down.isDown;
@@ -467,8 +630,11 @@ function update(time, delta) {
     const forwardY = -Math.cos(angle);
     const forwardSpeed = carFront.velocity.x * forwardX + carFront.velocity.y * forwardY;
     const maxSpeed = boosting ? CAR_CONFIG.boostMaxSpeed : CAR_CONFIG.maxSpeed;
-    const force = (accelerating ? CAR_CONFIG.driveForce : 0)
-        + (boosting ? CAR_CONFIG.boostForce : 0);
+    const response = 1 - Math.exp(-delta / (CAR_CONFIG.accelerationResponseSeconds * 1000));
+    accelerationAmount += ((accelerating ? 1 : 0) - accelerationAmount) * response;
+    boostAmount += ((boosting ? 1 : 0) - boostAmount) * response;
+    const force = accelerationAmount * CAR_CONFIG.driveForce
+        + boostAmount * CAR_CONFIG.boostForce;
 
     // Drive force stops at the speed cap; it never assigns the car's speed directly.
     if (force > 0 && forwardSpeed < maxSpeed) {
@@ -517,8 +683,57 @@ function update(time, delta) {
     // Simple skid marks: draw behind the rear wheels when the car is moving and turning/accelerating
     const speed = Math.hypot(carRear.velocity.x, carRear.velocity.y);
     const steering = cursors.left.isDown || wasd.left.isDown || cursors.right.isDown || wasd.right.isDown;
-    const revTarget = (accelerating ? 0.65 : 0) + (boosting ? 0.35 : 0);
-    engineRev += (revTarget - engineRev) * .05;
+    const revTarget = accelerationAmount * 0.65 + boostAmount * 0.35;
+    engineRev += (revTarget - engineRev) * .04;
+
+    const speedValue = Math.hypot(carFront.velocity.x, carFront.velocity.y);
+    if (gaugeMode === 'combined') {
+        drawGauge(
+            this.accelerationGauge,
+            400,
+            660,
+            revTarget,
+            GAUGE_CONFIG.accelerationMax,
+            this.accelerationGaugeLabel,
+            this.accelerationGaugeValue,
+            GAUGE_CONFIG.combinedInnerRadius,
+            350,
+            665,
+            690
+        );
+        drawGauge(
+            this.speedGauge,
+            400,
+            660,
+            speedValue,
+            GAUGE_CONFIG.speedMax,
+            this.speedGaugeLabel,
+            this.speedGaugeValue,
+            GAUGE_CONFIG.combinedRadius,
+            450,
+            665,
+            690
+        );
+    } else {
+        drawGauge(
+            this.accelerationGauge,
+            260,
+            680,
+            revTarget,
+            GAUGE_CONFIG.accelerationMax,
+            this.accelerationGaugeLabel,
+            this.accelerationGaugeValue
+        );
+        drawGauge(
+            this.speedGauge,
+            540,
+            680,
+            speedValue,
+            GAUGE_CONFIG.speedMax,
+            this.speedGaugeLabel,
+            this.speedGaugeValue
+        );
+    }
 
     if (speed > 0.8 && (steering || accelerating)) {
         const forwardX = Math.sin(carRear.angle);
