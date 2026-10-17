@@ -23,8 +23,41 @@ const GAUGE_CONFIG = {
 };
 
 const AUDIO_CONFIG = {
-    engineSound: 'muted',
-    lowPassFrequency: 1000
+    engineSound: 'engine',
+    lowPassFrequency: 1000,
+    masterVolume: 0.55
+};
+
+const ENGINE_AUDIO_CONFIG = {
+    idleRpm: 1000,
+    softLimiterRpm: 8600,
+    limiterRpm: 9000,
+    upshiftRpm: 7800,
+    downshiftRpm: 3300,
+    shiftTimeSeconds: 0.14,
+    redlineSpeed: 100,
+    rpmRiseSeconds: 0.12,
+    rpmFallSeconds: 0.2,
+    throttleRiseSeconds: 0.08,
+    throttleFallSeconds: 0.16,
+    throttleRpmBonus: 2600,
+    throttleRpmFadeSpeed: 120,
+    rpmPitchFactor: 0.2,
+    finalDrive: 3.44,
+    gears: [3.4, 2.36, 1.85, 1.47, 1.24, 1.07],
+    samples: {
+        onLow: { key: 'engine-on-low', file: 'BAC_Mono_onlow', rpm: 1000, volume: 0.5 },
+        onHigh: { key: 'engine-on-high', file: 'BAC_Mono_onhigh', rpm: 1000, volume: 0.5 },
+        offLow: { key: 'engine-off-low', file: 'BAC_Mono_offlow', rpm: 1000, volume: 0.5 },
+        offHigh: { key: 'engine-off-high', file: 'BAC_Mono_offveryhigh', rpm: 1000, volume: 0.5 },
+        limiter: { key: 'engine-limiter', file: 'limiter', rpm: 0, volume: 0.4 }
+    }
+};
+
+const REPLAY_CONFIG = {
+    sampleEveryFrames: 4,
+    maxQueuedPositions: 900,
+    playbackFramesPerPosition: 4
 };
 
 const REAR_TUNING = {
@@ -86,6 +119,10 @@ const TRACK_START = { x: worldsize * 0.3, y: worldsize * 0.3 };
 let enginePhase = 0;
 let engineRev = 0;
 let engineFilterState = 0;
+let engineRpm = ENGINE_AUDIO_CONFIG.idleRpm;
+let engineAudioThrottle = 0;
+let engineGear = 1;
+let gearShiftRemaining = 0;
 let rearTuningAmount = 0;
 let accelerationAmount = 0;
 let boostAmount = 0;
@@ -96,6 +133,9 @@ function preload() {
     this.load.audio('pickup-2', '/audio/pickup-coin-2.wav');
     this.load.audio('pickup-3', '/audio/pickup-coin-3.wav');
     this.load.audio('pickup-4', '/audio/pickup-coin-4.wav');
+    Object.values(ENGINE_AUDIO_CONFIG.samples).forEach(({ key, file }) => {
+        this.load.audio(key, `/audio/engine/${file}.wav`);
+    });
 }
 
 function createTrack(scene) {
@@ -338,7 +378,7 @@ function makeEngineBuffer(ctx, rev, duration = 0.02) {
                 : classicPulse;
         const subRumble = Math.sin(Math.PI * enginePhase);
         
-        let sample = AUDIO_CONFIG.engineSound === 'muted'
+        let sample = AUDIO_CONFIG.engineSound === 'muted' || AUDIO_CONFIG.engineSound === 'engine'
             ? 0
             : Math.tanh(pulse * 0.35 + subRumble * 0.45);
 
@@ -454,7 +494,182 @@ function drawGauge(
     valueText.setPosition(textX, valueY).setOrigin(0.5).setText(value.toFixed(0));
 }
 
+function initializeEngineAudio(scene) {
+    scene.engineAudioSounds = {};
+    Object.values(ENGINE_AUDIO_CONFIG.samples).forEach(({ key }) => {
+        const sound = scene.sound.add(key, { loop: true, volume: 0 });
+        scene.engineAudioSounds[key] = sound;
+
+        const startLoop = () => {
+            if (!sound.isPlaying) {
+                sound.play();
+            }
+        };
+        if (scene.sound.locked) {
+            scene.sound.once('unlocked', startLoop);
+        } else {
+            startLoop();
+        }
+    });
+}
+
+function equalPowerCrossfade(value, start, end) {
+    const amount = Phaser.Math.Clamp((value - start) / (end - start), 0, 1);
+    return {
+        high: Math.sin(amount * Math.PI / 2),
+        low: Math.cos(amount * Math.PI / 2)
+    };
+}
+
+function updateEngineAudio(scene, forwardSpeed, throttle, delta) {
+    const settings = ENGINE_AUDIO_CONFIG;
+    const gearRatio = settings.gears[engineGear - 1] * settings.finalDrive;
+    const topGearRatio = settings.gears[settings.gears.length - 1] * settings.finalDrive;
+    const speed = Math.max(0, forwardSpeed);
+    const rpmFromSpeed = speed * gearRatio / topGearRatio
+        * (settings.softLimiterRpm - settings.idleRpm) / settings.redlineSpeed;
+    const throttleResponseSeconds = throttle > engineAudioThrottle
+        ? settings.throttleRiseSeconds
+        : settings.throttleFallSeconds;
+    const throttleResponse = 1 - Math.exp(-delta / (throttleResponseSeconds * 1000));
+    engineAudioThrottle += (throttle - engineAudioThrottle) * throttleResponse;
+    const rpmFromThrottle = engineAudioThrottle * settings.throttleRpmBonus
+        * Math.max(0.35, 1 - speed / settings.throttleRpmFadeSpeed);
+    const targetRpm = Phaser.Math.Clamp(
+        settings.idleRpm + rpmFromSpeed + rpmFromThrottle,
+        settings.idleRpm,
+        settings.limiterRpm
+    );
+    const responseSeconds = targetRpm > engineRpm
+        ? settings.rpmRiseSeconds
+        : settings.rpmFallSeconds;
+    const response = 1 - Math.exp(-delta / (responseSeconds * 1000));
+    engineRpm += (targetRpm - engineRpm) * response;
+
+    gearShiftRemaining = Math.max(0, gearShiftRemaining - delta / 1000);
+    if (gearShiftRemaining === 0
+        && engineRpm >= settings.upshiftRpm
+        && engineGear < settings.gears.length) {
+        engineGear++;
+        gearShiftRemaining = settings.shiftTimeSeconds;
+    } else if (gearShiftRemaining === 0
+        && engineGear > 1
+        && engineRpm <= settings.downshiftRpm) {
+        engineGear--;
+        gearShiftRemaining = settings.shiftTimeSeconds;
+    }
+
+    const shiftCut = gearShiftRemaining > 0 ? 0.08 : 1;
+    const effectiveThrottle = engineAudioThrottle * shiftCut;
+    const rpmBlend = equalPowerCrossfade(engineRpm, 3000, 6500);
+    const onBlend = effectiveThrottle;
+    const offBlend = 1 - effectiveThrottle;
+    const limiterBlend = Phaser.Math.Clamp(
+        (engineRpm - settings.softLimiterRpm * 0.93)
+            / (settings.limiterRpm - settings.softLimiterRpm * 0.93),
+        0,
+        1
+    );
+    const samples = settings.samples;
+    const useEngineAudio = AUDIO_CONFIG.engineSound === 'engine';
+
+    const setSample = (sample, gain, applyPitch = true) => {
+        const sound = scene.engineAudioSounds[sample.key];
+        if (!sound) return;
+
+        sound.setVolume(useEngineAudio
+            ? gain * sample.volume * AUDIO_CONFIG.masterVolume
+            : 0);
+        if (applyPitch) {
+            sound.setDetune((engineRpm - sample.rpm) * settings.rpmPitchFactor);
+        }
+    };
+
+    setSample(samples.onLow, onBlend * rpmBlend.low);
+    setSample(samples.offLow, offBlend * rpmBlend.low);
+    setSample(samples.onHigh, onBlend * rpmBlend.high);
+    setSample(samples.offHigh, offBlend * rpmBlend.high);
+    setSample(samples.limiter, limiterBlend, false);
+    engineRev = Phaser.Math.Clamp(
+        (engineRpm - settings.idleRpm) / (settings.limiterRpm - settings.idleRpm),
+        0,
+        1
+    );
+    scene.engineStatus.setText(`AUTO  ${engineGear}  |  ${Math.round(engineRpm)} RPM`);
+}
+
+function recordPlayerPosition(scene) {
+    scene.recordFrameCount++;
+    if (scene.recordFrameCount < REPLAY_CONFIG.sampleEveryFrames) {
+        return;
+    }
+
+    scene.recordFrameCount = 0;
+    scene.recordedPositions.push({
+        x: carFront.position.x,
+        y: carFront.position.y,
+        rot: carFront.angle
+    });
+    if (scene.recordedPositions.length > REPLAY_CONFIG.maxQueuedPositions) {
+        scene.recordedPositions.shift();
+    }
+    scene.recordingStatus.setText(
+        `Replay buffer: ${scene.recordedPositions.length}/${REPLAY_CONFIG.maxQueuedPositions} | K to spawn`
+    );
+}
+
+function spawnReplayGhost(scene) {
+    if (scene.recordedPositions.length === 0) {
+        return;
+    }
+
+    const positions = scene.recordedPositions.slice();
+    scene.recordedPositions.length = 0;
+    scene.recordFrameCount = 0;
+    scene.recordingStatus.setText(
+        `Replay buffer: 0/${REPLAY_CONFIG.maxQueuedPositions} | K to spawn`
+    );
+
+    const car = scene.add.image(0, 0, 'car')
+        .setDisplaySize(46, 97)
+        .setAlpha(0.65)
+        .setTint(0x66ccff)
+        .setDepth(7);
+    scene.replayGhosts.push({ car, positions, positionIndex: 0, frameCount: 0 });
+}
+
+function updateReplayGhosts(scene) {
+    for (let i = scene.replayGhosts.length - 1; i >= 0; i--) {
+        const replay = scene.replayGhosts[i];
+        const position = replay.positions[replay.positionIndex];
+        const forwardX = Math.sin(position.rot);
+        const forwardY = -Math.cos(position.rot);
+        replay.car.setPosition(
+            position.x - forwardX * 28,
+            position.y - forwardY * 28
+        ).setRotation(position.rot);
+
+        replay.frameCount++;
+        if (replay.frameCount >= REPLAY_CONFIG.playbackFramesPerPosition) {
+            replay.frameCount = 0;
+            replay.positionIndex++;
+            if (replay.positionIndex >= replay.positions.length) {
+                replay.car.destroy();
+                scene.replayGhosts.splice(i, 1);
+            }
+        }
+    }
+}
+
 function create() {
+    engineRpm = ENGINE_AUDIO_CONFIG.idleRpm;
+    engineAudioThrottle = 0;
+    engineGear = 1;
+    gearShiftRemaining = 0;
+    this.recordedPositions = [];
+    this.recordFrameCount = 0;
+    this.replayGhosts = [];
+    initializeEngineAudio(this);
     playProcGenSound(this, makeEngineBuffer(this.sound.context, engineRev));
 
     socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
@@ -561,6 +776,12 @@ function create() {
         fontSize: '22px',
         color: '#ffffff'
     }).setScrollFactor(0).setDepth(21);
+    this.engineStatus = this.add.text(16, 160, '', {
+        fontSize: '16px',
+        color: '#ffffff',
+        backgroundColor: '#000000aa',
+        padding: { x: 8, y: 5 }
+    }).setScrollFactor(0).setDepth(20);
     const gaugeModeButton = document.getElementById('gauge-mode-button');
     gaugeModeButton.addEventListener('click', () => {
         gaugeMode = gaugeMode === 'split' ? 'combined' : 'split';
@@ -576,6 +797,7 @@ function create() {
 
     // Controls
     cursors = this.input.keyboard.createCursorKeys();
+    this.replayKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.K);
     wasd = this.input.keyboard.addKeys({
         up: Phaser.Input.Keyboard.KeyCodes.W,
         left: Phaser.Input.Keyboard.KeyCodes.A,
@@ -595,15 +817,32 @@ function create() {
     });
 
     // UI
-    this.add.text(16, 16, 'W / ↑  Accelerate\n↓ / Space  Boost\nA D or ← →  Steer\nMouse wheel  Zoom', {
+    this.add.text(16, 16, 'W / ↑  Accelerate\n↓ / Space  Boost\nA D or ← →  Steer\nK  Spawn replay ghost\nMouse wheel  Zoom', {
         fontSize: '18px',
         fill: '#ffffff',
         backgroundColor: '#000000aa',
         padding: { x: 12, y: 10 }
     }).setScrollFactor(0).setDepth(20);
+    this.recordingStatus = this.add.text(
+        16,
+        200,
+        `Replay buffer: 0/${REPLAY_CONFIG.maxQueuedPositions} | K to spawn`,
+        {
+            fontSize: '14px',
+            color: '#ffffff',
+            backgroundColor: '#000000aa',
+            padding: { x: 8, y: 5 }
+        }
+    ).setScrollFactor(0).setDepth(20);
 }
 
 function update(time, delta) {
+    recordPlayerPosition(this);
+    if (Phaser.Input.Keyboard.JustDown(this.replayKey)) {
+        spawnReplayGhost(this);
+    }
+    updateReplayGhosts(this);
+
     if (socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ x: carFront.position.x, y: carFront.position.y, rot: carFront.angle }));
     }
@@ -642,6 +881,8 @@ function update(time, delta) {
     const response = 1 - Math.exp(-delta / (CAR_CONFIG.accelerationResponseSeconds * 1000));
     accelerationAmount += ((accelerating ? 1 : 0) - accelerationAmount) * response;
     boostAmount += ((boosting ? 1 : 0) - boostAmount) * response;
+    const engineThrottle = accelerating || boosting ? 1 : 0;
+    updateEngineAudio(this, forwardSpeed, engineThrottle, delta);
     const force = accelerationAmount * CAR_CONFIG.driveForce
         + boostAmount * CAR_CONFIG.boostForce;
 
@@ -693,7 +934,6 @@ function update(time, delta) {
     const speed = Math.hypot(carRear.velocity.x, carRear.velocity.y);
     const steering = cursors.left.isDown || wasd.left.isDown || cursors.right.isDown || wasd.right.isDown;
     const revTarget = accelerationAmount * 0.65 + boostAmount * 0.35;
-    engineRev += (revTarget - engineRev) * .04;
 
     const speedValue = Math.hypot(carFront.velocity.x, carFront.velocity.y);
     if (gaugeMode === 'combined') {
